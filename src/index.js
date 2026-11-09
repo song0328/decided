@@ -180,9 +180,16 @@ async function notifyReliant(oldD, newD, reason) {
 
 const resolver = new Resolver();
 
+/** Display names are looked up when shown, never stored (no personal data cached beyond account ids). */
+async function withNames(items) {
+  const ids = [...new Set(items.map((d) => d.promotedBy).filter(Boolean))];
+  const names = new Map(await Promise.all(ids.map(async (id) => [id, await userName(id)])));
+  return items.map((d) => ({ ...d, promotedByName: names.get(d.promotedBy) || '' }));
+}
+
 resolver.define('list', async ({ payload }) => {
   const items = await all('by-issue', [payload.issueKey]);
-  return items.sort((a, b) => b.createdAt - a.createdAt);
+  return withNames(items.sort((a, b) => b.createdAt - a.createdAt));
 });
 
 resolver.define('add', async ({ payload, context }) =>
@@ -199,7 +206,7 @@ resolver.define('promote', async ({ payload, context }) => {
     status: STATUS.PROMOTED,
     promotedAt: Date.now(),
     promotedBy: context.accountId,
-    promotedByName: await userName(context.accountId),
+    promotedByName: '',
     staleSince: 0,
     supersedes: old ? old.id : '',
     supersedeReason: old ? reason : '',
@@ -290,7 +297,7 @@ async function confirmedDecisions() {
 /** MCP tool: what has the team already decided about <topic>? Only human-promoted decisions are returned. */
 export async function findDecisions(payload) {
   const query = [payload?.topic, payload?.issueKey].filter(Boolean).join(' ');
-  const hits = rank(await confirmedDecisions(), query, Number(payload?.limit) || 5);
+  const hits = await withNames(rank(await confirmedDecisions(), query, Number(payload?.limit) || 5));
   // A decision's own issue doesn't "rely" on it (agents look it up there when checking for conflicts).
   await recordReliance(hits.filter((d) => d.issueKey !== payload?.issueKey).map((d) => d.id), payload?.issueKey, 'mcp');
   if (!hits.length) {
