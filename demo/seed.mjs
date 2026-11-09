@@ -3,6 +3,7 @@
 //   node seed.mjs --dry-run              # print what would be created, no network
 //   node seed.mjs                        # stage "base": issues, comments, pages
 //   node seed.mjs --stage live           # scene 2:20: the new PSP meeting page
+//   node seed.mjs --project NWP          # same issues in another (clean) Jira project
 //
 // Needs ATLASSIAN_SITE (https://<name>.atlassian.net), ATLASSIAN_EMAIL and ATLASSIAN_API_TOKEN
 // (a classic API token from id.atlassian.com — the Forge-scoped token is for the forge CLI only).
@@ -27,6 +28,10 @@ if (!dryRun && !(site && process.env.ATLASSIAN_EMAIL && process.env.ATLASSIAN_AP
 // One state file per site, so the same data can be loaded into several sites.
 const statePath = join(here, `.seeded-${new URL(site || 'https://dry-run').hostname.split('.')[0]}.json`);
 const state = existsSync(statePath) ? JSON.parse(readFileSync(statePath, 'utf8')) : { issues: {}, pages: {} };
+// --project KEY loads the issues into another Jira project (e.g. a clean one for a recording).
+if (args.includes('--project')) data.jira.project.key = args[args.indexOf('--project') + 1];
+const issueState = data.jira.project.key === 'PAY' ? 'issues' : `issues_${data.jira.project.key}`;
+state[issueState] = state[issueState] || {};
 const auth = 'Basic ' + Buffer.from(`${process.env.ATLASSIAN_EMAIL}:${process.env.ATLASSIAN_API_TOKEN}`).toString('base64');
 
 async function call(method, path, body) {
@@ -98,8 +103,8 @@ async function seedIssues() {
   await ensureProject();
   const typeId = await issueTypeId();
   for (const i of issues) {
-    if (state.issues[i.ref]) {
-      console.log(`skip issue ${i.ref} = ${state.issues[i.ref]}`);
+    if (state[issueState][i.ref]) {
+      console.log(`skip issue ${i.ref} = ${state[issueState][i.ref]}`);
       continue;
     }
     const res = await must('POST', '/rest/api/3/issue', {
@@ -110,7 +115,7 @@ async function seedIssues() {
         description: adf(i.description),
       },
     });
-    state.issues[i.ref] = res.key;
+    state[issueState][i.ref] = res.key;
     save();
     for (const c of i.comments || []) await must('POST', `/rest/api/3/issue/${res.key}/comment`, { body: adf(c) });
     console.log(`created ${res.key} ${i.summary}`);

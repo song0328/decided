@@ -185,7 +185,7 @@ const App = () => {
       {group('superseded').length ? <Heading size="xsmall">History ({group('superseded').length})</Heading> : null}
       {group('superseded').map((d) => <DecisionCard key={d.id} d={d} onAct={act} busy={busy} />)}
       {items && !stale.length && !candidates.length && !decided.length ? (
-        <Text color="color.text.subtle">No decisions yet. Ask the Decided agent in Rovo, or add one manually.</Text>
+        <Text color="color.text.subtle">No decisions recorded on this issue yet. Ask the Decided agent in Rovo, or add one manually.</Text>
       ) : null}
     </Stack>
   );

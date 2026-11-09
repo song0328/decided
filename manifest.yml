@@ -127,7 +127,7 @@ modules:
         Put a rationale only if the text states the reason; never invent one.
         4. Call find-decisions with its topic. If a current decision covers the same subject with a DIFFERENT rule, pass its id as replaces.
         If the text only restates a current decision with the same rule, it is not new: skip it and mention that it is already decided.
-        5. Call propose-decision for each (issueKey = the Jira issue the user is working in; sourceUrl = the page URL if it came from Confluence).
+        5. Call propose-decision for each (issueKey = the Jira issue the user is working in). If the quote came from a Confluence page you MUST also pass sourceUrl = that page URL, or the quote check fails.
         6. Summarise what you proposed and remind the user that a teammate must promote each candidate in the Jira panel.
       conversationStarters:
         - What have we decided about payment retries?

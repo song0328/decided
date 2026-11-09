@@ -314,7 +314,7 @@ export async function findDecisions(payload) {
 export async function proposeDecision(payload, ctx) {
   const d = await createCandidate({
     issueKey: payload.issueKey,
-    sourceUrl: payload.sourceUrl,
+    sourceUrl: cleanUrl(payload.sourceUrl),
     quote: payload.quote,
     title: payload.title,
     statement: payload.statement,
@@ -337,10 +337,19 @@ export async function proposeDecision(payload, ctx) {
  * MCP tool: the text of a Jira issue (summary, description, comments) or a Confluence page, read with the
  * caller's own permissions, so an agent can find decisions in it and quote them verbatim.
  */
+/** Agents sometimes wrap URLs in backticks or quotes; keep just the URL. */
+function cleanUrl(url) {
+  return String(url || '').trim().replace(/^[`'"<(]+|[`'">).,]+$/g, '');
+}
+
 export async function readSource(payload) {
-  const src = await sourceText({ issueKey: payload?.issueKey, sourceUrl: payload?.sourceUrl }, api.asUser());
+  const sourceUrl = cleanUrl(payload?.sourceUrl);
+  const src = await sourceText({ issueKey: payload?.issueKey, sourceUrl }, api.asUser());
   return [
     `SOURCE (${src.kind}): ${src.title}`,
+    src.kind === 'confluence'
+      ? `When you propose a decision from this page, you MUST pass sourceUrl: ${sourceUrl} — otherwise its quote is checked against the Jira issue and fails.`
+      : `When you propose a decision from this issue, pass issueKey: ${payload?.issueKey} and no sourceUrl.`,
     'Quote decisions from this text verbatim, one sentence each. Open questions, ideas and action items are not decisions.',
     '',
     src.text.slice(0, 60000),
