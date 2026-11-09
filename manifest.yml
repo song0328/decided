@@ -1,0 +1,268 @@
+modules:
+  jira:issuePanel:
+    - key: decided-issue-panel
+      resource: main
+      resolver:
+        function: resolver
+      render: native
+      title: Decided
+      icon: https://developer.atlassian.com/platform/forge/images/icons/issue-panel-icon.svg
+
+  rovo:mcp:
+    - key: decided-mcp
+      name: Decided
+      tools:
+        - find-decisions
+        - propose-decision
+        - read-source
+
+  action:
+    - key: find-decisions
+      name: Find team decisions
+      function: findDecisions
+      actionVerb: GET
+      description: |
+        Look up what the team has ALREADY DECIDED about a topic before writing or changing code. Returns only human-promoted decisions with evidence quote and source. Call first when touching behaviour, limits, policies, naming or architecture.
+      inputs:
+        topic:
+          title: Topic
+          type: string
+          required: true
+          description: "What you are about to work on, e.g. 'payment retry policy'"
+        issueKey:
+          title: Jira issue you are working on
+          type: string
+          required: false
+          description: "The Jira issue your current work belongs to, e.g. PAY-50. Recorded
+            so the team is told if a decision you relied on later changes."
+    - key: propose-decision
+      name: Propose a team decision
+      function: proposeDecision
+      actionVerb: CREATE
+      description: |
+        Propose a decision you found in a Jira issue or Confluence page. It is saved as a CANDIDATE only;
+        a teammate must promote it in Jira before it counts. The quote must be copied verbatim from the source.
+      inputs:
+        issueKey:
+          title: Jira issue key
+          type: string
+          required: true
+          description: "Issue where the decision belongs, e.g. PAY-42"
+        statement:
+          title: Decision
+          type: string
+          required: true
+          description: "The decision in one sentence"
+        quote:
+          title: Evidence quote
+          type: string
+          required: true
+          description: "One sentence copied exactly from the issue or page that shows the
+            decision"
+        sourceUrl:
+          title: Confluence page URL
+          type: string
+          required: false
+          description: "If the quote comes from a Confluence page"
+        title:
+          title: Short title
+          type: string
+          required: false
+          description: "A few words naming the decision, e.g. 'Payment retry cap'"
+        rationale:
+          title: Why
+          type: string
+          required: false
+          description: "Reason stated in the source text. Leave empty if the text gives no reason; never invent one."
+        replaces:
+          title: Replaces decision
+          type: string
+          required: false
+          description: "Id of a current decision (from find-decisions) that this one changes, e.g. D-12. Leave empty if it is a new topic."
+    - key: read-source
+      name: Read a Jira issue or Confluence page
+      function: readSource
+      actionVerb: GET
+      description: |
+        Returns the text of a Jira issue (summary, description, comments) or a Confluence page, read with your own permissions. Use it to find decisions and copy evidence quotes verbatim.
+      inputs:
+        issueKey:
+          title: Jira issue key
+          type: string
+          required: false
+          description: "e.g. PAY-1"
+        sourceUrl:
+          title: Confluence page URL
+          type: string
+          required: false
+          description: "Full URL of the Confluence page"
+
+  jira:entityProperty:
+    - key: decided-recheck-property
+      entityType: issue
+      propertyKey: decided-recheck
+      values:
+        - path: recheck
+          type: string
+          searchAlias: decidedRecheck
+        - path: decisionId
+          type: string
+          searchAlias: decidedChangedDecision
+
+  rovo:agent:
+    - key: decided-agent
+      name: Decided
+      description: Answers "what has the team already decided about X?" from
+        human-promoted decisions, with evidence and history.
+      prompt: |
+        You help a software team respect the decisions it has already made.
+        Use find-decisions to answer questions about what was decided. Only promoted decisions count.
+        Always cite the decision id, its evidence quote and source. If a decision is marked NEEDS REVIEW or was replaced, say so.
+        If nothing was decided, say that clearly and suggest who to ask. Never invent a decision.
+
+        When asked to find decisions in a Jira issue or Confluence page:
+        1. Call read-source for it.
+        2. Pick only DECISIONS the team has made (agreed rules, limits, choices). Skip open questions, ideas, suggestions nobody agreed to, and action items. At most 5.
+        3. For each, copy ONE sentence from the text verbatim as the quote. Never paraphrase the quote. Give a short title (max 8 words).
+        Put a rationale only if the text states the reason; never invent one.
+        4. Call find-decisions with its topic. If a current decision covers the same subject with a DIFFERENT rule, pass its id as replaces.
+        If the text only restates a current decision with the same rule, it is not new: skip it and mention that it is already decided.
+        5. Call propose-decision for each (issueKey = the Jira issue the user is working in; sourceUrl = the page URL if it came from Confluence).
+        6. Summarise what you proposed and remind the user that a teammate must promote each candidate in the Jira panel.
+      conversationStarters:
+        - What have we decided about payment retries?
+        - Find decisions in this Confluence page
+        - Which decisions changed this month?
+      actions:
+        - find-decisions
+        - propose-decision
+        - read-source
+
+  trigger:
+    - key: decided-page-updated
+      function: onPageUpdated
+      events:
+        - avi:confluence:updated:page
+
+  function:
+    - key: resolver
+      handler: index.handler
+    - key: findDecisions
+      handler: index.findDecisions
+    - key: proposeDecision
+      handler: index.proposeDecision
+    - key: readSource
+      handler: index.readSource
+    - key: onPageUpdated
+      handler: index.onPageUpdated
+
+resources:
+  - key: main
+    path: src/frontend/index.jsx
+
+permissions:
+  scopes:
+    - storage:app
+    - read:jira-work
+    - write:jira-work
+    - read:jira-user
+    - read:confluence-content.summary
+    - read:page:confluence
+
+app:
+  runtime:
+    name: nodejs24.x
+  id: ari:cloud:ecosystem::app/28ca58c9-2292-48ae-a069-30cae6e1040c
+  # One installation for both products, so Jira, Confluence, Rovo and MCP calls share one storage.
+  compatibility:
+    jira:
+      required: true
+    confluence:
+      required: false
+  storage:
+    entities:
+      - name: decision
+        attributes:
+          id:
+            type: string
+          issueKey:
+            type: string
+          status:
+            type: string
+          sourcePageId:
+            type: string
+          sourceUrl:
+            type: string
+          sourceTitle:
+            type: string
+          title:
+            type: string
+          statement:
+            type: string
+          rationale:
+            type: string
+          quote:
+            type: string
+          quoteVerified:
+            type: boolean
+          origin:
+            type: string
+          proposedBy:
+            type: string
+          createdAt:
+            type: float
+          promotedAt:
+            type: float
+          promotedBy:
+            type: string
+          promotedByName:
+            type: string
+          staleSince:
+            type: float
+          conflictsWith:
+            type: string
+          conflictCheck:
+            type: string
+          supersedes:
+            type: string
+          supersededBy:
+            type: string
+          supersedeReason:
+            type: string
+        indexes:
+          - name: by-issue
+            partition:
+              - issueKey
+            range:
+              - createdAt
+          - name: by-status
+            partition:
+              - status
+            range:
+              - createdAt
+          - name: by-page
+            partition:
+              - sourcePageId
+            range:
+              - createdAt
+      - name: reliance
+        attributes:
+          decisionId:
+            type: string
+          issueKey:
+            type: string
+          client:
+            type: string
+          at:
+            type: float
+        indexes:
+          - name: by-decision
+            partition:
+              - decisionId
+            range:
+              - at
+          - name: by-issue
+            partition:
+              - issueKey
+            range:
+              - at

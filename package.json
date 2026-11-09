@@ -1,0 +1,20 @@
+{
+  "name": "decided",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "Decided — promote AI-proposed decision candidates into verified team decisions, and serve them to coding agents via Rovo MCP.",
+  "scripts": {
+    "lint": "forge lint",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@forge/api": "^8.5.0",
+    "@forge/bridge": "^7.3.0",
+    "@forge/kvs": "^2.1.2",
+    "@forge/react": "^12.5.0",
+    "@forge/resolver": "^2.0.2",
+    "react": "^18.3.1"
+  }
+}

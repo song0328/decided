@@ -1,0 +1,10 @@
+{
+  "name": "northwind-pay-charge-client",
+  "version": "1.4.0",
+  "private": true,
+  "type": "module",
+  "description": "Fictional demo repo for the Decided video (Northwind Pay is not a real company).",
+  "scripts": {
+    "test": "node --test"
+  }
+}
