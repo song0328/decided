@@ -252,3 +252,15 @@ test('the demo candidates are AI proposals, so the judge promoting them is not s
   // A second press does not create the issues again.
   assert.deepEqual((await call('demoStart', { projectKey: 'DEMO' })).issues, s.issues);
 });
+
+test("other teams' decisions are shown only when they clearly match, at most two", async () => {
+  for (const k of ['A', 'B', 'C']) {
+    site.issues[`${k}-1`] = { summary: 'x', description: 'x', comments: ['We agreed payment retries are capped at 3 with exponential backoff.'] };
+    const d = await call('add', { issueKey: `${k}-1`, statement: 'Payment retries are capped at 3.', quote: 'We agreed payment retries are capped at 3 with exponential backoff.' });
+    await call('promote', { id: d.id });
+    await call('promoteScope', { id: d.id }, 'u-bob');
+  }
+  const out = await app.findDecisions({ topic: 'payment retries', issueKey: 'SHOP-1' });
+  assert.equal((out.match(/NOT a rule/g) || []).length, 2);
+  assert.match(await app.findDecisions({ topic: 'settings page colour', issueKey: 'SHOP-1' }), /No confirmed team decisions/);
+});

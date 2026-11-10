@@ -221,7 +221,7 @@ resolver.define('list', async ({ payload, context }) => {
     const use = usage(d, await allOf(reliance(), 'by-decision', [d.id]));
     return { ...d, scope: scopeOf(d), usage: use, ladder: promotionChecks(d, use, context.accountId, pol) };
   }));
-  return withNames(withLadder.sort((a, b) => b.createdAt - a.createdAt));
+  return withNames(withLadder.sort((a, b) => (b.createdAt - a.createdAt) || (Number(String(b.id).slice(2)) - Number(String(a.id).slice(2)))));
 });
 
 /** Move a current decision one rung up the ladder (issue -> team -> org) if its checks pass. */
@@ -499,7 +499,11 @@ async function confirmedDecisions() {
 export async function findDecisions(payload, ctx) {
   const issueKey = normalizeIssueKey(payload?.issueKey);
   const query = String(payload?.topic || '');
-  const hits = await withNames(rank(inScopeFor(await confirmedDecisions(), issueKey), query, Number(payload?.limit) || 5));
+  // Binding decisions first; other teams' decisions only when they clearly match, and at most two, so the answer stays short.
+  let others = 0;
+  const ranked = rank(inScopeFor(await confirmedDecisions(), issueKey), query, 20)
+    .filter((d) => d.appliesHere !== false || (strongMatch(d, query) && (others += 1) <= 2));
+  const hits = await withNames(ranked.slice(0, Number(payload?.limit) || 5));
   // Only decisions that matched the topic count as used, and a decision's own issue doesn't "rely" on it
   // (agents look it up there when checking for conflicts).
   await recordReliance(hits.filter((d) => d.issueKey !== issueKey && strongMatch(d, query)).map((d) => d.id), issueKey, 'mcp',

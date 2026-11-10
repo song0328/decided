@@ -37,7 +37,7 @@ Then run `/mcp` in Claude Code → `decided` → Authenticate → choose your si
 
 ```bash
 npm install
-npm test            # 39 tests: pure logic + end-to-end resolver/MCP/trigger tests on an in-memory Forge and fake Jira/Confluence
+npm test            # 40 tests: pure logic + end-to-end resolver/MCP/trigger tests on an in-memory Forge and fake Jira/Confluence
 npm run coverage    # line coverage (96%)
 forge deploy
 forge install       # Jira first, then Confluence
