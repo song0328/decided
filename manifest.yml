@@ -8,6 +8,14 @@ modules:
       title: Decided
       icon: https://developer.atlassian.com/platform/forge/images/icons/issue-panel-icon.svg
 
+  jira:adminPage:
+    - key: decided-admin
+      resource: admin
+      resolver:
+        function: adminResolver
+      render: native
+      title: Decided
+
   jira:projectPage:
     - key: decided-log
       resource: log
@@ -157,6 +165,8 @@ modules:
   function:
     - key: resolver
       handler: index.handler
+    - key: adminResolver
+      handler: index.adminHandler
     - key: findDecisions
       handler: index.findDecisions
     - key: proposeDecision
@@ -171,6 +181,8 @@ resources:
     path: src/frontend/index.jsx
   - key: log
     path: src/frontend/log.jsx
+  - key: admin
+    path: src/frontend/admin.jsx
 
 permissions:
   scopes:

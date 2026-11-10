@@ -83,7 +83,7 @@ function DecisionCard({ d, onAct, onRely, busy }) {
         ) : null}
         {d.status === 'candidate' && conflicts.length ? (
           <SectionMessage appearance="warning" title={`Conflicts with ${conflicts.join(', ')}`}>
-            <Text>{d.conflictCheck === 'agent' ? 'The AI that proposed it says it replaces a current decision.' : 'Same topic as a current decision — check whether it replaces it.'} Promote it as the replacement, or discard it.</Text>
+            <Text>{d.conflictCheck === 'agent' ? (d.origin === 'ai' ? 'The AI that proposed it says it replaces a current decision.' : 'Its proposer says it replaces a current decision.') : 'Same topic as a current decision — check whether it replaces it.'} Promote it as the replacement, or discard it.</Text>
             <Textfield placeholder="Why did the decision change? (shown to everyone who relied on the old one)" onChange={(e) => setReason(e.target.value)} />
           </SectionMessage>
         ) : null}
@@ -212,7 +212,7 @@ const App = () => {
       ) : null}
 
       {demo && demo.step !== 'done' ? (
-        <SectionMessage appearance="discovery" title="Try Decided in 2 minutes (no Rovo needed)">
+        <SectionMessage appearance="discovery" title="Try Decided in 3 minutes (no Rovo needed)">
           {demo.step === 'start' ? (
             <>
               <Text>Creates 3 fictional issues in {projectKey} (“Northwind Pay” payments team) with meeting comments, and 3 decision candidates whose quotes Decided checks against those comments.</Text>

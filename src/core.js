@@ -91,7 +91,7 @@ export function score(decision, query) {
 
 export function rank(decisions, query, limit = 5) {
   return decisions
-    .map((d) => ({ d, s: score(d, query) }))
+    .map((d) => { const s = score(d, query); return { d, s: s > 0 && d.appliesHere !== false ? s + 0.5 : s }; })
     .filter((x) => x.s > 0)
     .sort((a, b) => b.s - a.s || (b.d.promotedAt || 0) - (a.d.promotedAt || 0))
     .slice(0, limit)
@@ -110,7 +110,7 @@ export function formatForAgent(d) {
     d.rationale ? `  Why: ${d.rationale}` : null,
     `  Evidence: "${d.quote}" — ${d.sourceUrl || d.issueKey}`,
     d.supersedes ? `  Replaces: ${d.supersedes}${d.supersedeReason ? ` (${d.supersedeReason})` : ''} — the older decision is no longer valid` : null,
-    d.scope || d.status ? scopeLine(d) : null,
+    d.scope || d.status ? `  ${scopeLine(d)}` : null,
     `  Status: ${d.status === STATUS.STALE ? 'NEEDS REVIEW — the quoted source text changed; do not rely on it without asking' : 'confirmed'} (${who}, ${when}${d.promotedByName ? `, by ${d.promotedByName}` : ''})`,
   ];
   return lines.filter(Boolean).join('\n');
@@ -363,9 +363,10 @@ export function usage(d, reliances = []) {
  * Checks for promoting a CURRENT decision one rung up. Like CI checks on a pull request:
  * the quote must still be in the source, and there must be evidence beyond one person's click.
  */
-export function promotionChecks(d, use, accountId) {
+export function promotionChecks(d, use, accountId, policy = {}) {
   const target = nextScope(d);
   if (!target || d.status !== STATUS.PROMOTED) return { target: null, checks: [], allowed: false, suggested: false };
+  const owners = Array.isArray(policy.owners) ? policy.owners.filter(Boolean) : [];
   const lastBy = d.scopeBy || d.promotedBy;
   const quote = { key: 'quote', label: 'Evidence quote still in the source', ok: Boolean(d.quoteVerified) };
   const second = { key: 'second', label: 'Promoted by someone other than the last promoter', ok: Boolean(accountId) && accountId !== lastBy };
@@ -375,25 +376,50 @@ export function promotionChecks(d, use, accountId) {
   } else {
     evidence = { key: 'used', label: `Used outside its own project (${use.otherProjects.length ? use.otherProjects.join(', ') : 'none yet'})`, ok: use.otherProjects.length >= 1 };
   }
-  const allowed = quote.ok && (second.ok || evidence.ok);
-  return { target, checks: [quote, evidence, second], allowed, suggested: quote.ok && evidence.ok };
+  const checks = [quote, evidence, second];
+  let allowed = quote.ok && (policy.requireSecondPerson ? second.ok : second.ok || evidence.ok);
+  if (owners.length) {
+    const owner = { key: 'owner', label: 'Promoted by a decision owner (set by your Jira admin)', ok: owners.includes(accountId) };
+    checks.push(owner);
+    allowed = allowed && owner.ok;
+  }
+  if (policy.requireSecondPerson) second.label += ' (required by your Jira admin)';
+  return { target, checks, allowed, suggested: quote.ok && evidence.ok };
+}
+
+export const DEFAULT_POLICY = Object.freeze({ owners: [], requireSecondPerson: false });
+
+/** Admin settings are stored as given by the UI; keep only what the ladder understands. */
+export function cleanPolicy(p = {}) {
+  const owners = (Array.isArray(p.owners) ? p.owners : [p.owners])
+    .map((o) => (typeof o === 'string' ? o : o && (o.id || o.accountId)))
+    .filter((o) => typeof o === 'string' && o.length > 0 && o.length < 200);
+  return { owners: [...new Set(owners)].slice(0, 50), requireSecondPerson: Boolean(p.requireSecondPerson) };
 }
 
 /** Which current decisions an agent working on `issueKey` must follow. */
 export function inScopeFor(decisions, issueKey) {
   const p = projectOf(issueKey);
-  return decisions.filter((d) => {
+  const out = [];
+  for (const d of decisions) {
     const s = scopeOf(d);
-    if (s === SCOPE.ORG) return true;
-    if (!issueKey) return s === SCOPE.TEAM; // no issue given: team decisions everywhere (each labelled with its project)
-    if (s === SCOPE.TEAM) return projectOf(d.issueKey) === p;
-    return d.issueKey === issueKey;
-  });
+    if (s === SCOPE.ORG) out.push({ ...d, appliesHere: true });
+    else if (!issueKey) { if (s === SCOPE.TEAM) out.push({ ...d, appliesHere: true }); }
+    else if (s === SCOPE.TEAM) { if (projectOf(d.issueKey) === p) out.push({ ...d, appliesHere: true }); }
+    else if (d.issueKey === issueKey) out.push({ ...d, appliesHere: true });
+    // Another issue's decision in the same project: shown, but clearly not a rule here yet.
+    // If the agent follows it, that use is recorded as evidence that it may deserve Team reach.
+    else if (projectOf(d.issueKey) === p) out.push({ ...d, appliesHere: false });
+  }
+  return out;
 }
 
 export function scopeLine(d) {
   const s = scopeOf(d);
   if (s === SCOPE.ORG) return 'Scope: ORG STANDARD — applies to every project';
   if (s === SCOPE.TEAM) return `Scope: TEAM DECISION — applies to all work in project ${projectOf(d.issueKey) || '?'}`;
+  if (d.appliesHere === false) {
+    return `Scope: ISSUE DECISION of ${d.issueKey} — NOT a team rule yet. You may follow it here if it fits, but say so; this use is recorded and counts toward promoting it to a Team decision.`;
+  }
   return `Scope: ISSUE DECISION — applies only to ${d.issueKey}`;
 }

@@ -9,10 +9,14 @@ import {
   STATUS, ORIGIN, CURRENT, toPlainText, adfToText, quoteFound, confluencePageId,
   rank, formatForAgent, newId, seqId,
   relatedDecisions, history, reliantIssues, recheckComment, DEMO, demoStep, isSelfPromotion, projectLog, sameProject,
-  SCOPE, scopeOf, usage, promotionChecks, inScopeFor,
+  SCOPE, scopeOf, usage, promotionChecks, inScopeFor, DEFAULT_POLICY, cleanPolicy,
 } from './core.js';
 
 const store = () => kvs.entity('decision');
+const POLICY_KEY = 'policy';
+async function policy() {
+  return cleanPolicy((await kvs.get(POLICY_KEY)) || DEFAULT_POLICY);
+}
 const reliance = () => kvs.entity('reliance');
 
 // ---------- sources: where evidence quotes live ----------
@@ -193,10 +197,11 @@ resolver.define('list', async ({ payload, context }) => {
   // Show only conflicts that still matter: current decisions in the same project (older data may name others).
   const live = new Set(sameProject(await currentDecisions(), payload.issueKey).map((d) => d.id));
   const cleaned = items.map((d) => ({ ...d, conflictsWith: (d.conflictsWith || '').split(',').filter((id) => live.has(id)).join(',') }));
+  const pol = await policy();
   const withLadder = await Promise.all(cleaned.map(async (d) => {
     if (d.status !== STATUS.PROMOTED) return d;
     const use = usage(d, await allOf(reliance(), 'by-decision', [d.id]));
-    return { ...d, scope: scopeOf(d), usage: use, ladder: promotionChecks(d, use, context.accountId) };
+    return { ...d, scope: scopeOf(d), usage: use, ladder: promotionChecks(d, use, context.accountId, pol) };
   }));
   return withNames(withLadder.sort((a, b) => b.createdAt - a.createdAt));
 });
@@ -206,10 +211,11 @@ resolver.define('promoteScope', async ({ payload, context }) => {
   const d = await store().get(payload.id);
   if (!d) throw new Error('Not found');
   const use = usage(d, await allOf(reliance(), 'by-decision', [d.id]));
-  const ladder = promotionChecks(d, use, context.accountId);
+  const ladder = promotionChecks(d, use, context.accountId, await policy());
   if (!ladder.target) throw new Error(`${d.id} cannot be promoted further.`);
   if (!ladder.allowed) {
-    throw new Error(`Not enough evidence to make ${d.id} a ${ladder.target} decision yet: it needs to be used by other work, or promoted by a second person.`);
+    const missing = ladder.checks.filter((c) => !c.ok).map((c) => c.label).join('; ');
+    throw new Error(`${d.id} cannot become a ${ladder.target} decision yet. Missing: ${missing}.`);
   }
   return save({ ...d, scope: ladder.target, scopeBy: context.accountId, scopeAt: Date.now() });
 });
@@ -416,6 +422,18 @@ resolver.define('demoChange', async ({ payload, context }) => {
 });
 
 export const handler = resolver.getDefinitions();
+
+// ---------- Jira admin page: who may widen a decision's reach ----------
+// A separate function, so only the admin page module (visible to Jira admins) can change the policy.
+
+const admin = new Resolver();
+admin.define('getPolicy', async () => policy());
+admin.define('savePolicy', async ({ payload }) => {
+  const p = cleanPolicy(payload);
+  await kvs.set(POLICY_KEY, p);
+  return p;
+});
+export const adminHandler = admin.getDefinitions();
 
 // ---------- Rovo MCP tools (actions) ----------
 

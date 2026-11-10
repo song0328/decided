@@ -177,7 +177,25 @@ test('agents get org + their team + their issue', () => {
     { id: 'D', scope: 'issue', issueKey: 'PAY-6' },
     { id: 'E', scope: 'issue', issueKey: 'PAY-9' },
   ];
-  assert.deepEqual(inScopeFor(ds, 'PAY-6').map((d) => d.id), ['A', 'B', 'D']);
+  const got = inScopeFor(ds, 'PAY-6');
+  assert.deepEqual(got.map((d) => [d.id, d.appliesHere]), [['A', true], ['B', true], ['D', true], ['E', false]]);
   assert.deepEqual(inScopeFor(ds, '').map((d) => d.id), ['A', 'B', 'C']);
+  assert.match(formatForAgent({ ...got[3], status: STATUS.PROMOTED, statement: 'x', quote: 'q' }), /NOT a team rule yet/);
   assert.match(formatForAgent({ ...ds[1], status: STATUS.PROMOTED, statement: 'x', quote: 'q' }), /TEAM DECISION/);
+});
+
+import { cleanPolicy } from '../src/core.js';
+
+test('admin policy: owners only, and a required second person', () => {
+  const d = { status: STATUS.PROMOTED, scope: 'issue', quoteVerified: true, promotedBy: 'u1', issueKey: 'PAY-6' };
+  const used = { issues: 2, otherProjects: [] };
+  assert.equal(promotionChecks(d, used, 'u1', { owners: ['lead'] }).allowed, false);
+  assert.equal(promotionChecks(d, used, 'lead', { owners: ['lead'] }).allowed, true);
+  assert.equal(promotionChecks(d, used, 'u1', { requireSecondPerson: true }).allowed, false);
+  assert.equal(promotionChecks(d, used, 'u2', { requireSecondPerson: true }).allowed, true);
+  assert.ok(promotionChecks(d, used, 'u1', { owners: ['lead'] }).checks.some((c) => c.key === 'owner' && !c.ok));
+});
+test('cleanPolicy accepts picker objects and drops junk', () => {
+  assert.deepEqual(cleanPolicy({ owners: [{ id: 'a' }, 'b', 'b', null, 5], requireSecondPerson: 'yes' }), { owners: ['a', 'b'], requireSecondPerson: true });
+  assert.deepEqual(cleanPolicy(), { owners: [], requireSecondPerson: false });
 });
