@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import ForgeReconciler, {
   Box, Button, Heading, Inline, Link, Lozenge, SectionMessage, Select, Stack, Text, TextArea, Textfield, useProductContext,
 } from '@forge/react';
@@ -49,7 +49,10 @@ function Ladder({ d, onAct, busy }) {
 
 function DecisionCard({ d, onAct, onRely, busy }) {
   const [label, look] = LABEL[d.status] || [d.status, 'neutral'];
-  const [reason, setReason] = useState('');
+  // Typing fast can drop some change events across the UI Kit bridge, so keep the latest value in a ref and
+  // take the final one again on blur (clicking the button blurs the field first).
+  const reasonRef = useRef('');
+  const keepReason = (e) => { reasonRef.current = e?.target?.value ?? reasonRef.current; };
   const conflicts = (d.conflictsWith || '').split(',').filter(Boolean);
   return (
     <Box xcss={{ padding: 'space.100', borderColor: 'color.border', borderWidth: 'border.width', borderStyle: 'solid', borderRadius: 'radius.small' }}>
@@ -84,7 +87,7 @@ function DecisionCard({ d, onAct, onRely, busy }) {
         {d.status === 'candidate' && conflicts.length ? (
           <SectionMessage appearance="warning" title={`Conflicts with ${conflicts.join(', ')}`}>
             <Text>{d.conflictCheck === 'agent' ? (d.origin === 'ai' ? 'The AI that proposed it says it replaces a current decision.' : 'Its proposer says it replaces a current decision.') : 'Same topic as a current decision — check whether it replaces it.'} Promote it as the replacement, or discard it.</Text>
-            <Textfield placeholder="Why did the decision change? (shown to everyone who relied on the old one)" onChange={(e) => setReason(e.target.value)} />
+            <Textfield placeholder="Why did the decision change? (shown to everyone who relied on the old one)" onChange={keepReason} onBlur={keepReason} />
           </SectionMessage>
         ) : null}
         {d.status === 'promoted' ? <Ladder d={d} onAct={onAct} busy={busy} /> : null}
@@ -94,7 +97,7 @@ function DecisionCard({ d, onAct, onRely, busy }) {
           {d.status === 'candidate' ? (
             <>
               {conflicts.map((id) => (
-                <Button key={id} appearance="warning" isDisabled={busy || !d.quoteVerified} onClick={() => onAct('promote', d.id, { supersede: id, reason })}>Promote, replacing {id}</Button>
+                <Button key={id} appearance="warning" isDisabled={busy || !d.quoteVerified} onClick={() => onAct('promote', d.id, { supersede: id, reason: reasonRef.current })}>Promote, replacing {id}</Button>
               ))}
               <Button appearance={conflicts.length ? 'default' : 'primary'} isDisabled={busy || !d.quoteVerified} onClick={() => onAct('promote', d.id)}>{conflicts.length ? 'Promote, keep both' : 'Promote'}</Button>
               <Button appearance="subtle" isDisabled={busy} onClick={() => onAct('discard', d.id)}>Discard</Button>
