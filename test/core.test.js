@@ -88,3 +88,96 @@ test('recheck comment names old and new decision', () => {
   assert.match(c, /D-12/); assert.match(c, /D-31/); assert.match(c, /new PSP limits/);
   assert.match(recheckComment(d12, null), /quoted text changed/);
 });
+
+import { DEMO, demoStep } from '../src/core.js';
+
+test('demo quotes really appear in the demo comments', () => {
+  const retry = DEMO.issues.find((i) => i.ref === 'retry');
+  const text = [retry.summary, retry.description, ...retry.comments].join('\n');
+  for (const c of DEMO.candidates) assert.equal(quoteFound(c.quote, text), true, c.key);
+  assert.equal(quoteFound(DEMO.change.quote, DEMO.change.comment), true);
+  assert.equal(quoteFound(DEMO.change.quote, text), false); // not there until step 2
+});
+test('demo steps', () => {
+  assert.equal(demoStep(null), 'start');
+  const st = { issues: { retry: 'X-1' }, capId: 'D-1' };
+  assert.equal(demoStep(st, [{ id: 'D-1', status: STATUS.CANDIDATE }]), 'promote');
+  assert.equal(demoStep(st, [{ id: 'D-1', status: STATUS.PROMOTED, scope: 'issue' }]), 'use');
+  assert.equal(demoStep({ ...st, used: true }, [{ id: 'D-1', status: STATUS.PROMOTED, scope: 'issue' }]), 'team');
+  assert.equal(demoStep({ ...st, used: true }, [{ id: 'D-1', status: STATUS.PROMOTED, scope: 'team' }]), 'change');
+  assert.equal(demoStep({ ...st, changed: true }, []), 'done');
+});
+
+import { isSelfPromotion, projectLog } from '../src/core.js';
+
+test('self-promotion only for human-entered candidates by the same person', () => {
+  assert.equal(isSelfPromotion({ origin: ORIGIN.HUMAN, proposedBy: 'u1' }, 'u1'), true);
+  assert.equal(isSelfPromotion({ origin: ORIGIN.HUMAN, proposedBy: 'u1' }, 'u2'), false);
+  assert.equal(isSelfPromotion({ origin: ORIGIN.AI, proposedBy: 'u1' }, 'u1'), false);
+  assert.match(formatForAgent({ ...ds[1], selfPromoted: true }), /not reviewed by a second person/);
+});
+test('project log groups by status and project', () => {
+  const log = projectLog([
+    { id: 'D-1', issueKey: 'PAY-1', status: STATUS.PROMOTED, promotedAt: 1, selfPromoted: true },
+    { id: 'D-2', issueKey: 'PAY-2', status: STATUS.PROMOTED, promotedAt: 2 },
+    { id: 'D-3', issueKey: 'PAYX-1', status: STATUS.PROMOTED },
+    { id: 'D-4', issueKey: 'PAY-1', status: STATUS.SUPERSEDED },
+    { id: 'D-5', issueKey: 'PAY-3', status: STATUS.STALE },
+  ], 'PAY');
+  assert.deepEqual(log.current.map((d) => d.id), ['D-2', 'D-1']);
+  assert.equal(log.history.length, 1);
+  assert.equal(log.review.length, 1);
+  assert.equal(log.selfPromoted, 1);
+});
+
+import { projectOf, sameProject } from '../src/core.js';
+
+test('conflicts and pickers stay inside one Jira project', () => {
+  assert.equal(projectOf('PAY-12'), 'PAY');
+  assert.equal(projectOf('NPAY-1'), 'NPAY');
+  assert.equal(projectOf('nope'), '');
+  const ds = [{ id: 'D-1', issueKey: 'NPAY-1' }, { id: 'D-2', issueKey: 'PAY-6' }];
+  assert.deepEqual(sameProject(ds, 'PAY-9').map((d) => d.id), ['D-2']);
+  assert.equal(sameProject(ds, '').length, 2);
+});
+
+import { SCOPE, scopeOf, nextScope, usage, promotionChecks, inScopeFor } from '../src/core.js';
+
+test('promotion ladder: scope order and legacy decisions', () => {
+  assert.equal(scopeOf({}), SCOPE.TEAM);
+  assert.equal(nextScope({ scope: 'issue' }), 'team');
+  assert.equal(nextScope({ scope: 'team' }), 'org');
+  assert.equal(nextScope({ scope: 'org' }), null);
+});
+test('usage counts other issues and other projects', () => {
+  const u = usage({ issueKey: 'PAY-6' }, [{ issueKey: 'PAY-6' }, { issueKey: 'PAY-7' }, { issueKey: 'PAY-7' }, { issueKey: 'SHOP-3' }]);
+  assert.equal(u.issues, 2);
+  assert.deepEqual(u.otherProjects, ['SHOP']);
+});
+test('issue -> team needs evidence or a second person', () => {
+  const d = { status: STATUS.PROMOTED, scope: 'issue', quoteVerified: true, promotedBy: 'u1', issueKey: 'PAY-6' };
+  let c = promotionChecks(d, { issues: 0, otherProjects: [] }, 'u1');
+  assert.equal(c.target, 'team'); assert.equal(c.allowed, false);
+  c = promotionChecks(d, { issues: 2, otherProjects: [] }, 'u1');
+  assert.equal(c.allowed, true); assert.equal(c.suggested, true);
+  c = promotionChecks(d, { issues: 0, otherProjects: [] }, 'u2');
+  assert.equal(c.allowed, true); assert.equal(c.suggested, false);
+  assert.equal(promotionChecks({ ...d, quoteVerified: false }, { issues: 5, otherProjects: [] }, 'u2').allowed, false);
+});
+test('team -> org needs use outside the project or a second person', () => {
+  const d = { status: STATUS.PROMOTED, scope: 'team', quoteVerified: true, promotedBy: 'u1', scopeBy: 'u2', issueKey: 'PAY-6' };
+  assert.equal(promotionChecks(d, { issues: 9, otherProjects: [] }, 'u2').allowed, false);
+  assert.equal(promotionChecks(d, { issues: 0, otherProjects: ['SHOP'] }, 'u2').allowed, true);
+});
+test('agents get org + their team + their issue', () => {
+  const ds = [
+    { id: 'A', scope: 'org', issueKey: 'SEC-1' },
+    { id: 'B', scope: 'team', issueKey: 'PAY-1' },
+    { id: 'C', scope: 'team', issueKey: 'SHOP-1' },
+    { id: 'D', scope: 'issue', issueKey: 'PAY-6' },
+    { id: 'E', scope: 'issue', issueKey: 'PAY-9' },
+  ];
+  assert.deepEqual(inScopeFor(ds, 'PAY-6').map((d) => d.id), ['A', 'B', 'D']);
+  assert.deepEqual(inScopeFor(ds, '').map((d) => d.id), ['A', 'B', 'C']);
+  assert.match(formatForAgent({ ...ds[1], status: STATUS.PROMOTED, statement: 'x', quote: 'q' }), /TEAM DECISION/);
+});

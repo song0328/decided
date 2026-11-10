@@ -8,6 +8,15 @@ modules:
       title: Decided
       icon: https://developer.atlassian.com/platform/forge/images/icons/issue-panel-icon.svg
 
+  jira:projectPage:
+    - key: decided-log
+      resource: log
+      resolver:
+        function: resolver
+      render: native
+      title: Decision log
+      icon: https://developer.atlassian.com/platform/forge/images/icons/issue-panel-icon.svg
+
   rovo:mcp:
     - key: decided-mcp
       name: Decided
@@ -117,6 +126,7 @@ modules:
       prompt: |
         You help a software team respect the decisions it has already made.
         Use find-decisions to answer questions about what was decided. Only promoted decisions count.
+        Decisions have a scope: an issue decision applies to one issue, a team decision to a whole project, an org standard to every project. Always pass the issue the user is working on, and say which scope each decision has.
         Always cite the decision id, its evidence quote and source. If a decision is marked NEEDS REVIEW or was replaced, say so.
         If nothing was decided, say that clearly and suggest who to ask. Never invent a decision.
 
@@ -159,6 +169,8 @@ modules:
 resources:
   - key: main
     path: src/frontend/index.jsx
+  - key: log
+    path: src/frontend/log.jsx
 
 permissions:
   scopes:
@@ -218,6 +230,14 @@ app:
           promotedByName:
             type: string
           staleSince:
+            type: float
+          selfPromoted:
+            type: boolean
+          scope:
+            type: string
+          scopeBy:
+            type: string
+          scopeAt:
             type: float
           conflictsWith:
             type: string

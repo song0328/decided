@@ -100,7 +100,9 @@ export function rank(decisions, query, limit = 5) {
 
 /** How a decision is shown to a coding agent: short, with provenance, so it can cite it. */
 export function formatForAgent(d) {
-  const who = d.origin === ORIGIN.AI ? 'AI-proposed, human-promoted' : 'human-entered, human-promoted';
+  const who = d.origin === ORIGIN.AI
+    ? 'AI-proposed, human-promoted'
+    : d.selfPromoted ? 'entered and promoted by the same person — not reviewed by a second person' : 'human-entered, promoted by another person';
   const when = d.promotedAt ? new Date(d.promotedAt).toISOString().slice(0, 10) : 'unknown date';
   const lines = [
     `DECISION ${d.id}: ${d.title}`,
@@ -108,6 +110,7 @@ export function formatForAgent(d) {
     d.rationale ? `  Why: ${d.rationale}` : null,
     `  Evidence: "${d.quote}" — ${d.sourceUrl || d.issueKey}`,
     d.supersedes ? `  Replaces: ${d.supersedes}${d.supersedeReason ? ` (${d.supersedeReason})` : ''} — the older decision is no longer valid` : null,
+    d.scope || d.status ? scopeLine(d) : null,
     `  Status: ${d.status === STATUS.STALE ? 'NEEDS REVIEW — the quoted source text changed; do not rely on it without asking' : 'confirmed'} (${who}, ${when}${d.promotedByName ? `, by ${d.promotedByName}` : ''})`,
   ];
   return lines.filter(Boolean).join('\n');
@@ -236,4 +239,161 @@ export function seqId(n) {
 
 export function newId(now = Date.now()) {
   return `D-${now.toString(36).toUpperCase()}${Math.floor(Math.random() * 1296).toString(36).toUpperCase().padStart(2, '0')}`;
+}
+
+// ---------- guided demo for judges (fictional "Northwind Pay" data, created in the judge's own project) ----------
+
+export const DEMO = Object.freeze({
+  issues: [
+    {
+      ref: 'retry',
+      summary: '[Decided demo] Improve retries on failed card payments',
+      description: 'About 4% of card payments fail on the first attempt, mostly PSP timeouts. We need one retry policy that checkout, ops alerts and the charge client all follow.',
+      comments: [
+        'From the 3 Nov payments sync: We agreed payment retries are capped at 3 with exponential backoff. Hard declines such as insufficient funds or a stolen card are never retried.',
+        'Agreed with Ops: the whole retry sequence must finish within 30 seconds so the checkout page never times out.',
+        "Could we add jitter to the backoff? Let's try it in staging first; not decided yet.",
+      ],
+    },
+    {
+      ref: 'charge-client',
+      summary: '[Decided demo] Fix retry logic in the charge client',
+      description: "The charge client still retries twice with a fixed delay and retries every error. Bring it in line with the team's retry policy.",
+      comments: [],
+    },
+    {
+      ref: 'checkout-msg',
+      summary: "[Decided demo] Checkout: show a 'still trying' message while a payment is retried",
+      description: 'Copy depends on how many attempts we make.',
+      comments: [],
+    },
+  ],
+  // Candidates the demo creates on the "retry" issue. Quotes are copied verbatim from the comments above.
+  candidates: [
+    { key: 'cap', title: 'Payment retries capped at 3', statement: 'Payment retries are capped at 3 with exponential backoff.', quote: 'We agreed payment retries are capped at 3 with exponential backoff.' },
+    { key: 'declines', title: 'Hard declines are never retried', statement: 'Hard declines (insufficient funds, stolen card) are never retried.', quote: 'Hard declines such as insufficient funds or a stolen card are never retried.' },
+    { key: 'budget', title: 'Retry sequence finishes within 30 s', statement: 'The whole retry sequence finishes within 30 seconds.', quote: 'the whole retry sequence must finish within 30 seconds so the checkout page never times out.' },
+  ],
+  // Step 2: a later meeting changes the rule.
+  change: {
+    comment: 'From the 2 Dec PSP migration sync: because of the new PSP limits, we agreed to raise payment retries to 5 attempts with exponential backoff.',
+    title: 'Payment retries raised to 5',
+    statement: 'Payment retries are raised to 5 attempts with exponential backoff.',
+    quote: 'we agreed to raise payment retries to 5 attempts with exponential backoff.',
+    rationale: 'New PSP contract and rate limits from 1 Jan.',
+  },
+});
+
+/** Which guided-demo step to show, from the stored demo state and the decisions on the demo issue. */
+export function demoStep(state, decisions = []) {
+  if (!state || !state.issues) return 'start';
+  if (state.changed) return 'done';
+  const cap = decisions.find((d) => d.id === state.capId);
+  if (!cap || cap.status !== STATUS.PROMOTED) return 'promote';
+  if (!state.used) return 'use';
+  if (scopeOf(cap) === SCOPE.ISSUE) return 'team';
+  return 'change';
+}
+
+// ---------- self-promotion & project decision log ----------
+
+/** A person promoting a candidate they typed in themselves: no second pair of eyes. AI proposals don't count. */
+export function isSelfPromotion(d, accountId) {
+  return Boolean(accountId) && d.origin === ORIGIN.HUMAN && d.proposedBy === accountId;
+}
+
+/** Decisions whose issue belongs to the project, grouped for the Decision log page. */
+export function projectLog(decisions, projectKey) {
+  const mine = decisions.filter((d) => String(d.issueKey || '').startsWith(`${projectKey}-`));
+  const by = (s) => mine.filter((d) => d.status === s);
+  const newest = (k) => (a, b) => (b[k] || 0) - (a[k] || 0);
+  return {
+    current: by(STATUS.PROMOTED).sort(newest('promotedAt')),
+    review: by(STATUS.STALE).sort(newest('staleSince')),
+    candidates: by(STATUS.CANDIDATE).sort(newest('createdAt')),
+    history: by(STATUS.SUPERSEDED).sort(newest('promotedAt')),
+    selfPromoted: by(STATUS.PROMOTED).filter((d) => d.selfPromoted).length,
+  };
+}
+
+/** Jira project key of an issue key ("PAY-12" -> "PAY"). Decisions are a team's, so conflicts stay inside one project. */
+export function projectOf(issueKey = '') {
+  const m = String(issueKey).match(/^([A-Z][A-Z0-9_]*)-\d+$/);
+  return m ? m[1] : '';
+}
+
+export function sameProject(decisions, issueKey) {
+  const p = projectOf(issueKey);
+  return p ? decisions.filter((d) => projectOf(d.issueKey) === p) : decisions;
+}
+
+// ---------- promotion ladder: candidate → issue decision → team decision → org standard ----------
+// Promotion is not "approve"; it widens WHO the decision applies to (which work, which agents),
+// and each step needs more evidence than the one before.
+
+export const SCOPE = Object.freeze({ ISSUE: 'issue', TEAM: 'team', ORG: 'org' });
+export const SCOPE_ORDER = [SCOPE.ISSUE, SCOPE.TEAM, SCOPE.ORG];
+export const SCOPE_LABEL = { issue: 'Issue decision', team: 'Team decision', org: 'Org standard' };
+
+/** Decisions promoted before the ladder existed applied project-wide, so treat them as team decisions. */
+export function scopeOf(d) {
+  return SCOPE_ORDER.includes(d.scope) ? d.scope : SCOPE.TEAM;
+}
+
+export function nextScope(d) {
+  const i = SCOPE_ORDER.indexOf(scopeOf(d));
+  return i >= 0 && i < SCOPE_ORDER.length - 1 ? SCOPE_ORDER[i + 1] : null;
+}
+
+/** Where a decision has actually been used: distinct issues and projects other than its own. */
+export function usage(d, reliances = []) {
+  const own = projectOf(d.issueKey);
+  const issues = new Set();
+  const otherProjects = new Set();
+  for (const r of reliances) {
+    if (!r.issueKey || r.issueKey === d.issueKey) continue;
+    issues.add(r.issueKey);
+    const p = projectOf(r.issueKey);
+    if (p && p !== own) otherProjects.add(p);
+  }
+  return { issues: issues.size, otherProjects: [...otherProjects] };
+}
+
+/**
+ * Checks for promoting a CURRENT decision one rung up. Like CI checks on a pull request:
+ * the quote must still be in the source, and there must be evidence beyond one person's click.
+ */
+export function promotionChecks(d, use, accountId) {
+  const target = nextScope(d);
+  if (!target || d.status !== STATUS.PROMOTED) return { target: null, checks: [], allowed: false, suggested: false };
+  const lastBy = d.scopeBy || d.promotedBy;
+  const quote = { key: 'quote', label: 'Evidence quote still in the source', ok: Boolean(d.quoteVerified) };
+  const second = { key: 'second', label: 'Promoted by someone other than the last promoter', ok: Boolean(accountId) && accountId !== lastBy };
+  let evidence;
+  if (target === SCOPE.TEAM) {
+    evidence = { key: 'used', label: `Used by other work in the project (${use.issues}/2 issues)`, ok: use.issues >= 2 };
+  } else {
+    evidence = { key: 'used', label: `Used outside its own project (${use.otherProjects.length ? use.otherProjects.join(', ') : 'none yet'})`, ok: use.otherProjects.length >= 1 };
+  }
+  const allowed = quote.ok && (second.ok || evidence.ok);
+  return { target, checks: [quote, evidence, second], allowed, suggested: quote.ok && evidence.ok };
+}
+
+/** Which current decisions an agent working on `issueKey` must follow. */
+export function inScopeFor(decisions, issueKey) {
+  const p = projectOf(issueKey);
+  return decisions.filter((d) => {
+    const s = scopeOf(d);
+    if (s === SCOPE.ORG) return true;
+    if (!issueKey) return s === SCOPE.TEAM; // no issue given: team decisions everywhere (each labelled with its project)
+    if (s === SCOPE.TEAM) return projectOf(d.issueKey) === p;
+    return d.issueKey === issueKey;
+  });
+}
+
+export function scopeLine(d) {
+  const s = scopeOf(d);
+  if (s === SCOPE.ORG) return 'Scope: ORG STANDARD — applies to every project';
+  if (s === SCOPE.TEAM) return `Scope: TEAM DECISION — applies to all work in project ${projectOf(d.issueKey) || '?'}`;
+  return `Scope: ISSUE DECISION — applies only to ${d.issueKey}`;
 }
