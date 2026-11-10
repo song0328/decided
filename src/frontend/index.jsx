@@ -37,7 +37,7 @@ function Ladder({ d, onAct, busy }) {
       {l && l.target ? (
         <SectionMessage appearance={l.suggested ? 'discovery' : 'information'} title={l.suggested ? `Ready to become a ${SCOPE_NAME[l.target]}` : `Promote to ${SCOPE_NAME[l.target]}`}>
           {l.checks.map((c) => <Text key={c.key}>{c.ok ? '✅' : '⬜'} {c.label}</Text>)}
-          <Text color="color.text.subtlest">Needs the quote, plus real use or a second person.</Text>
+          {l.rule ? <Text color="color.text.subtlest">{l.rule}</Text> : null}
           <Button appearance={l.suggested ? 'primary' : 'default'} isDisabled={busy || !l.allowed} onClick={() => onAct('promoteScope', d.id)}>
             Promote to {SCOPE_NAME[l.target]}
           </Button>
@@ -202,7 +202,7 @@ const App = () => {
           <Box xcss={{ width: '70%' }}>
             <Select
               placeholder="This work relies on a team decision…"
-              options={current.filter((c) => c.issueKey !== issueKey).map((c) => ({ label: `${c.id} · ${c.title}`, value: c.id }))}
+              options={current.filter((c) => c.issueKey !== issueKey).map((c) => ({ label: `${c.id} · ${c.title}${c.project && c.project !== issueKey.split('-')[0] ? ` (${c.scope === 'org' ? 'Org standard' : `Team decision of ${c.project}`})` : ''}`, value: c.id }))}
               value={pick}
               onChange={(o) => setPick(o)}
             />

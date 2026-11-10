@@ -86,7 +86,21 @@ export function score(decision, query) {
   const q = new Set(tokens(query));
   if (!q.size) return 1; // empty query → everything matches equally
   const weigh = (text, w) => tokens(text).reduce((s, t) => s + (q.has(t) ? w : 0), 0);
-  return weigh(decision.title, 3) + weigh(decision.statement, 2) + weigh(decision.rationale, 1) + weigh(decision.issueKey, 3);
+  // The issue key decides scope (inScopeFor), never relevance: matching on the project key would make every
+  // decision in the project look relevant to any question, and record "use" that never happened.
+  return weigh(decision.title, 3) + weigh(decision.statement, 2) + weigh(decision.rationale, 1);
+}
+
+/**
+ * Was this decision really what the agent asked about? Its title shares a word with the question, or at least two
+ * different words match. Only such hits are recorded as "used" — one shared word like "page" is not use.
+ */
+export function strongMatch(decision, query) {
+  const q = new Set(tokens(query));
+  if (!q.size) return false;
+  if (tokens(decision.title).some((t) => q.has(t))) return true;
+  const hit = new Set([...tokens(decision.statement), ...tokens(decision.rationale)].filter((t) => q.has(t)));
+  return hit.size >= 2;
 }
 
 export function rank(decisions, query, limit = 5) {
@@ -286,7 +300,7 @@ export const DEMO = Object.freeze({
 
 /** Which guided-demo step to show, from the stored demo state and the decisions on the demo issue. */
 export function demoStep(state, decisions = []) {
-  if (!state || !state.issues) return 'start';
+  if (!state || !state.capId) return 'start'; // not finished setting up (a retry continues where it stopped)
   if (state.changed) return 'done';
   const cap = decisions.find((d) => d.id === state.capId);
   if (!cap || cap.status !== STATUS.PROMOTED) return 'promote';
@@ -314,6 +328,12 @@ export function projectLog(decisions, projectKey) {
     history: by(STATUS.SUPERSEDED).sort(newest('promotedAt')),
     selfPromoted: by(STATUS.PROMOTED).filter((d) => d.selfPromoted).length,
   };
+}
+
+/** "pay-12", "PAY-12 ", ".../browse/PAY-12" -> "PAY-12"; anything else -> "". Agents pass keys in many shapes. */
+export function normalizeIssueKey(value = '') {
+  const m = String(value || '').match(/(?:^|[^A-Za-z0-9_])([A-Za-z][A-Za-z0-9_]*-\d+)(?![0-9])/);
+  return m ? m[1].toUpperCase() : '';
 }
 
 /** Jira project key of an issue key ("PAY-12" -> "PAY"). Decisions are a team's, so conflicts stay inside one project. */
@@ -345,13 +365,18 @@ export function nextScope(d) {
   return i >= 0 && i < SCOPE_ORDER.length - 1 ? SCOPE_ORDER[i + 1] : null;
 }
 
-/** Where a decision has actually been used: distinct issues and projects other than its own. */
+/**
+ * Where a decision has actually been used: distinct issues and projects other than its own.
+ * Use recorded by the person who last promoted it doesn't count — one person can't vouch for themselves.
+ */
 export function usage(d, reliances = []) {
   const own = projectOf(d.issueKey);
+  const promoter = d.scopeBy || d.promotedBy;
   const issues = new Set();
   const otherProjects = new Set();
   for (const r of reliances) {
     if (!r.issueKey || r.issueKey === d.issueKey) continue;
+    if (r.by && promoter && r.by === promoter) continue;
     issues.add(r.issueKey);
     const p = projectOf(r.issueKey);
     if (p && p !== own) otherProjects.add(p);
@@ -384,10 +409,36 @@ export function promotionChecks(d, use, accountId, policy = {}) {
     allowed = allowed && owner.ok;
   }
   if (policy.requireSecondPerson) second.label += ' (required by your Jira admin)';
-  return { target, checks, allowed, suggested: quote.ok && evidence.ok };
+  const rule = [
+    policy.requireSecondPerson ? 'Needs the quote and a second person.' : 'Needs the quote, plus real use by others or a second person.',
+    owners.length ? 'Only decision owners can widen its reach.' : '',
+  ].filter(Boolean).join(' ');
+  return { target, checks, allowed, suggested: quote.ok && evidence.ok, rule };
 }
 
 export const DEFAULT_POLICY = Object.freeze({ owners: [], requireSecondPerson: false });
+
+/**
+ * "Promote, replacing D-x": the candidate inherits D-x's reach, so widening rules apply to it too.
+ * Returns { ok, reason }.
+ */
+export function replacementCheck(candidate, old, accountId, policy = {}) {
+  if (!old || !CURRENT.includes(old.status)) return { ok: false, reason: 'The decision it replaces is no longer current.' };
+  if (old.id === candidate.id) return { ok: false, reason: 'A decision cannot replace itself.' };
+  if (!String(candidate.conflictsWith || '').split(',').includes(old.id)) return { ok: false, reason: `${candidate.id} is not flagged as replacing ${old.id}.` };
+  if (projectOf(old.issueKey) !== projectOf(candidate.issueKey)) return { ok: false, reason: 'Only a decision in the same project can be replaced.' };
+  if (scopeOf(old) === SCOPE.ISSUE) return { ok: true, reason: '' };
+  const owners = Array.isArray(policy.owners) ? policy.owners.filter(Boolean) : [];
+  const reach = SCOPE_LABEL[scopeOf(old)];
+  if (owners.length && !owners.includes(accountId)) return { ok: false, reason: `Replacing a ${reach} needs a decision owner (set by your Jira admin).` };
+  if (isSelfPromotion(candidate, accountId)) {
+    return { ok: false, reason: `You entered ${candidate.id} yourself, so replacing a ${reach} needs a second person to promote it. Or promote it, keeping both, as an Issue decision.` };
+  }
+  if (policy.requireSecondPerson && accountId && accountId === (old.scopeBy || old.promotedBy)) {
+    return { ok: false, reason: `Your Jira admin requires a second person: someone other than whoever made ${old.id} a ${reach} must approve the replacement.` };
+  }
+  return { ok: true, reason: '' };
+}
 
 /** Admin settings are stored as given by the UI; keep only what the ladder understands. */
 export function cleanPolicy(p = {}) {
@@ -398,14 +449,17 @@ export function cleanPolicy(p = {}) {
 }
 
 /** Which current decisions an agent working on `issueKey` must follow. */
-export function inScopeFor(decisions, issueKey) {
+export function inScopeFor(decisions, rawIssueKey) {
+  const issueKey = normalizeIssueKey(rawIssueKey);
   const p = projectOf(issueKey);
   const out = [];
   for (const d of decisions) {
     const s = scopeOf(d);
     if (s === SCOPE.ORG) out.push({ ...d, appliesHere: true });
-    else if (!issueKey) { if (s === SCOPE.TEAM) out.push({ ...d, appliesHere: true }); }
-    else if (s === SCOPE.TEAM) { if (projectOf(d.issueKey) === p) out.push({ ...d, appliesHere: true }); }
+    // Without an issue we can't tell whose rules apply: team decisions are shown with their project, not as rules.
+    else if (!issueKey) { if (s === SCOPE.TEAM) out.push({ ...d, appliesHere: false }); }
+    // Another team's decision: visible (following it is evidence it deserves Org reach), but not a rule here.
+    else if (s === SCOPE.TEAM) out.push({ ...d, appliesHere: projectOf(d.issueKey) === p });
     else if (d.issueKey === issueKey) out.push({ ...d, appliesHere: true });
     // Another issue's decision in the same project: shown, but clearly not a rule here yet.
     // If the agent follows it, that use is recorded as evidence that it may deserve Team reach.
@@ -417,6 +471,9 @@ export function inScopeFor(decisions, issueKey) {
 export function scopeLine(d) {
   const s = scopeOf(d);
   if (s === SCOPE.ORG) return 'Scope: ORG STANDARD — applies to every project';
+  if (s === SCOPE.TEAM && d.appliesHere === false) {
+    return `Scope: TEAM DECISION of project ${projectOf(d.issueKey) || '?'} — NOT a rule for your work unless it is in that project (pass issueKey to know). If you follow it elsewhere, say so; that use counts toward making it an Org standard.`;
+  }
   if (s === SCOPE.TEAM) return `Scope: TEAM DECISION — applies to all work in project ${projectOf(d.issueKey) || '?'}`;
   if (d.appliesHere === false) {
     return `Scope: ISSUE DECISION of ${d.issueKey} — NOT a team rule yet. You may follow it here if it fits, but say so; this use is recorded and counts toward promoting it to a Team decision.`;

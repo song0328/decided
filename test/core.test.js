@@ -178,9 +178,13 @@ test('agents get org + their team + their issue', () => {
     { id: 'E', scope: 'issue', issueKey: 'PAY-9' },
   ];
   const got = inScopeFor(ds, 'PAY-6');
-  assert.deepEqual(got.map((d) => [d.id, d.appliesHere]), [['A', true], ['B', true], ['D', true], ['E', false]]);
-  assert.deepEqual(inScopeFor(ds, '').map((d) => d.id), ['A', 'B', 'C']);
-  assert.match(formatForAgent({ ...got[3], status: STATUS.PROMOTED, statement: 'x', quote: 'q' }), /NOT a team rule yet/);
+  // Other teams' team decisions are visible but not binding; other issues' decisions in this project likewise.
+  assert.deepEqual(got.map((d) => [d.id, d.appliesHere]), [['A', true], ['B', true], ['C', false], ['D', true], ['E', false]]);
+  // Keys come in many shapes; without one, only org standards bind.
+  assert.deepEqual(inScopeFor(ds, 'https://x.atlassian.net/browse/pay-6').map((d) => d.appliesHere), [true, true, false, true, false]);
+  assert.deepEqual(inScopeFor(ds, '').map((d) => [d.id, d.appliesHere]), [['A', true], ['B', false], ['C', false]]);
+  assert.match(formatForAgent({ ...got[4], status: STATUS.PROMOTED, statement: 'x', quote: 'q' }), /NOT a team rule yet/);
+  assert.match(formatForAgent({ ...got[2], status: STATUS.PROMOTED, statement: 'x', quote: 'q' }), /TEAM DECISION of project SHOP — NOT a rule/);
   assert.match(formatForAgent({ ...ds[1], status: STATUS.PROMOTED, statement: 'x', quote: 'q' }), /TEAM DECISION/);
 });
 
@@ -198,4 +202,13 @@ test('admin policy: owners only, and a required second person', () => {
 test('cleanPolicy accepts picker objects and drops junk', () => {
   assert.deepEqual(cleanPolicy({ owners: [{ id: 'a' }, 'b', 'b', null, 5], requireSecondPerson: 'yes' }), { owners: ['a', 'b'], requireSecondPerson: true });
   assert.deepEqual(cleanPolicy(), { owners: [], requireSecondPerson: false });
+});
+
+import { strongMatch } from '../src/core.js';
+
+test('only a real match counts as use', () => {
+  const d = { title: 'Retry sequence duration', statement: 'The whole retry sequence must finish within 30 seconds so the checkout page never times out.' };
+  assert.equal(strongMatch(d, 'retry logic in the charge client'), true); // title word
+  assert.equal(strongMatch(d, 'button colour on the settings page'), false); // one shared word in the body
+  assert.equal(strongMatch(d, 'checkout page timeouts'), true); // two body words
 });

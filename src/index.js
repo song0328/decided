@@ -10,6 +10,7 @@ import {
   rank, formatForAgent, newId, seqId,
   relatedDecisions, history, reliantIssues, recheckComment, DEMO, demoStep, isSelfPromotion, projectLog, sameProject,
   SCOPE, scopeOf, usage, promotionChecks, inScopeFor, DEFAULT_POLICY, cleanPolicy,
+  normalizeIssueKey, projectOf, replacementCheck, strongMatch,
 } from './core.js';
 
 const store = () => kvs.entity('decision');
@@ -153,12 +154,28 @@ async function findConflicts(candidate, replaces) {
 
 // ---------- reliance — which work leaned on which decision ----------
 
-async function recordReliance(decisionIds, issueKey, client) {
-  if (!issueKey) return;
+/**
+ * Record that work on `rawIssueKey` relied on these decisions. `by` is who recorded it (their own use doesn't count
+ * as evidence when they promote). Best effort: a bad key or a storage error never breaks the lookup that called it.
+ */
+async function recordReliance(decisionIds, rawIssueKey, client, by) {
+  const issueKey = normalizeIssueKey(rawIssueKey);
+  if (!issueKey || !decisionIds.length) return;
   const at = Date.now();
-  await Promise.all(decisionIds.map((decisionId) =>
-    reliance().set(`${decisionId}:${issueKey}:${at}`, { decisionId, issueKey, client: client || 'agent', at })));
+  await Promise.all(decisionIds.map(async (decisionId) => {
+    try {
+      const row = { decisionId, issueKey, client: client || 'agent', at };
+      if (by) row.by = by;
+      await reliance().set(`${decisionId}:${issueKey}:${at}`, row);
+    } catch {
+      // ignore: evidence is a nice-to-have, the answer to the agent is not
+    }
+  }));
 }
+
+/** The issue/project the panel is on comes from Forge's context, not from what the browser sends. */
+const issueOf = (context, payload) => normalizeIssueKey(context?.extension?.issue?.key || payload?.issueKey);
+const projectOfContext = (context, payload) => context?.extension?.project?.key || payload?.projectKey || projectOf(issueOf(context, payload));
 
 const adf = (text) => ({
   type: 'doc', version: 1,
@@ -193,9 +210,10 @@ async function withNames(items) {
 }
 
 resolver.define('list', async ({ payload, context }) => {
-  const items = await all('by-issue', [payload.issueKey]);
+  const issueKey = issueOf(context, payload);
+  const items = await all('by-issue', [issueKey]);
   // Show only conflicts that still matter: current decisions in the same project (older data may name others).
-  const live = new Set(sameProject(await currentDecisions(), payload.issueKey).map((d) => d.id));
+  const live = new Set(sameProject(await currentDecisions(), issueKey).map((d) => d.id));
   const cleaned = items.map((d) => ({ ...d, conflictsWith: (d.conflictsWith || '').split(',').filter((id) => live.has(id)).join(',') }));
   const pol = await policy();
   const withLadder = await Promise.all(cleaned.map(async (d) => {
@@ -226,8 +244,13 @@ resolver.define('add', async ({ payload, context }) =>
 resolver.define('promote', async ({ payload, context }) => {
   const d = await store().get(payload.id);
   if (!d) throw new Error('Not found');
+  if (d.status !== STATUS.CANDIDATE) throw new Error(`${d.id} is not a candidate any more.`);
   if (!d.quoteVerified) throw new Error('The quote was not found in the source. Fix the quote before promoting.');
   const old = payload.supersede ? await store().get(payload.supersede) : null;
+  if (payload.supersede) {
+    const check = replacementCheck(d, old, context.accountId, await policy());
+    if (!check.ok) throw new Error(check.reason);
+  }
   const reason = payload.reason || '';
   const promoted = await save({
     ...d,
@@ -269,11 +292,12 @@ resolver.define('history', async ({ payload }) => {
 });
 
 /** For the banner: decisions this issue's work relied on, and whether one changed since. */
-resolver.define('rechecks', async ({ payload }) => {
-  const rs = await allOf(reliance(), 'by-issue', [payload.issueKey]);
+resolver.define('rechecks', async ({ payload, context }) => {
+  const issueKey = issueOf(context, payload);
+  const rs = await allOf(reliance(), 'by-issue', [issueKey]);
   const ids = [...new Set(rs.map((r) => r.decisionId))];
   const ds = (await Promise.all(ids.map((id) => store().get(id)))).filter(Boolean);
-  const res = await api.asApp().requestJira(route`/rest/api/3/issue/${payload.issueKey}/properties/decided-recheck`);
+  const res = await api.asApp().requestJira(route`/rest/api/3/issue/${issueKey}/properties/decided-recheck`);
   const flag = res.ok ? (await res.json()).value : null;
   return {
     open: flag?.recheck === 'yes',
@@ -281,8 +305,8 @@ resolver.define('rechecks', async ({ payload }) => {
   };
 });
 
-resolver.define('markRechecked', async ({ payload }) => {
-  await api.asApp().requestJira(route`/rest/api/3/issue/${payload.issueKey}/properties/decided-recheck`, {
+resolver.define('markRechecked', async ({ payload, context }) => {
+  await api.asApp().requestJira(route`/rest/api/3/issue/${issueOf(context, payload)}/properties/decided-recheck`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ recheck: 'no', at: Date.now() }),
   });
@@ -290,20 +314,30 @@ resolver.define('markRechecked', async ({ payload }) => {
 });
 
 /** Current team decisions (any issue), for "this work relies on …" from another issue's panel. */
-resolver.define('current', async ({ payload }) => {
-  const ds = sameProject(await currentDecisions(), payload?.issueKey || '');
-  return ds.sort((a, b) => (b.promotedAt || 0) - (a.promotedAt || 0)).map((d) => ({ id: d.id, title: d.title, issueKey: d.issueKey }));
+resolver.define('current', async ({ payload, context }) => {
+  const issueKey = issueOf(context, payload);
+  const here = projectOf(issueKey);
+  const ds = (await currentDecisions()).filter((d) => projectOf(d.issueKey) === here || scopeOf(d) !== SCOPE.ISSUE);
+  return ds.sort((a, b) => (b.promotedAt || 0) - (a.promotedAt || 0))
+    .map((d) => ({ id: d.id, title: d.title, issueKey: d.issueKey, project: projectOf(d.issueKey), scope: scopeOf(d) }));
 });
 
 /** A person marks "this work relies on that decision" from the panel (agents do it via MCP). */
-resolver.define('relyOn', async ({ payload }) => {
-  await recordReliance([payload.id], payload.issueKey, 'person');
+resolver.define('relyOn', async ({ payload, context }) => {
+  const issueKey = issueOf(context, payload);
+  const d = await store().get(payload.id);
+  if (!d || !CURRENT.includes(d.status)) throw new Error('That decision is not current.');
+  if (projectOf(d.issueKey) !== projectOf(issueKey) && scopeOf(d) === SCOPE.ISSUE) throw new Error(`${d.id} is another project's issue decision.`);
+  await recordReliance([d.id], issueKey, 'person', context.accountId);
   return true;
 });
 
 resolver.define('discard', async ({ payload }) => {
   const d = await store().get(payload.id);
   if (!d) throw new Error('Not found');
+  if (d.status !== STATUS.CANDIDATE && d.status !== STATUS.STALE) {
+    throw new Error(`${d.id} is a current decision. Replace it with a new one instead, so the work that relied on it is told.`);
+  }
   return save({ ...d, status: STATUS.DISCARDED });
 });
 
@@ -320,13 +354,15 @@ resolver.define('recheck', async ({ payload }) => {
 // ---------- Decision log (Jira project page) ----------
 
 /** Every decision in this project, grouped, plus the issues still waiting for a re-check (JQL on our property). */
-resolver.define('log', async ({ payload }) => {
+resolver.define('log', async ({ payload, context }) => {
+  const projectKey = projectOfContext(context, payload);
+  if (!/^[A-Z][A-Z0-9_]*$/.test(projectKey)) throw new Error('Open the Decision log from a Jira project.');
   const statuses = [STATUS.PROMOTED, STATUS.STALE, STATUS.CANDIDATE, STATUS.SUPERSEDED];
   const lists = await Promise.all(statuses.map((s) => all('by-status', [s])));
-  const log = projectLog(await withNames(lists.flat()), payload.projectKey);
+  const log = projectLog(await withNames(lists.flat()), projectKey);
   let recheck = [];
   try {
-    const jql = `project = "${payload.projectKey}" AND decidedRecheck = yes ORDER BY updated DESC`;
+    const jql = `project = "${projectKey}" AND decidedRecheck = yes ORDER BY updated DESC`;
     const res = await api.asUser().requestJira(route`/rest/api/3/search/jql?jql=${jql}&fields=summary&maxResults=50`);
     if (res.ok) recheck = ((await res.json()).issues || []).map((i) => ({ key: i.key, summary: i.fields?.summary || '' }));
   } catch {
@@ -360,44 +396,58 @@ async function demoIssueTypeId(projectKey) {
   return pick.id;
 }
 
-resolver.define('demoState', async ({ payload }) => {
-  const state = await kvs.get(demoKey(payload.projectKey));
+resolver.define('demoState', async ({ payload, context }) => {
+  const state = await kvs.get(demoKey(projectOfContext(context, payload)));
   const decisions = state?.issues?.retry ? await all('by-issue', [state.issues.retry]) : [];
   return { state: state || null, step: demoStep(state, decisions) };
 });
 
 /** Step 1: create the fictional issues in this project (as the user) and three candidates to promote. */
 resolver.define('demoStart', async ({ payload, context }) => {
-  const { projectKey } = payload;
-  const existing = await kvs.get(demoKey(projectKey));
-  if (existing?.issues) return existing;
-  const typeId = await demoIssueTypeId(projectKey);
-  const issues = {};
+  const projectKey = projectOfContext(context, payload);
+  // Saved after every step, so pressing the button again after a failure continues instead of duplicating issues.
+  const state = (await kvs.get(demoKey(projectKey))) || { issues: {}, comments: {}, ids: {} };
+  if (state.capId) return state;
+  state.issues ||= {}; state.comments ||= {}; state.ids ||= {};
+  const saveState = () => kvs.set(demoKey(projectKey), state);
+  let typeId;
   for (const i of DEMO.issues) {
-    const created = await asUserJson('POST', route`/rest/api/3/issue`, {
-      fields: { project: { key: projectKey }, issuetype: { id: typeId }, summary: i.summary, description: adf(i.description) },
-    });
-    issues[i.ref] = created.key;
-    for (const c of i.comments) await asUserJson('POST', route`/rest/api/3/issue/${created.key}/comment`, { body: adf(c) });
+    if (!state.issues[i.ref]) {
+      typeId ||= await demoIssueTypeId(projectKey);
+      const created = await asUserJson('POST', route`/rest/api/3/issue`, {
+        fields: { project: { key: projectKey }, issuetype: { id: typeId }, summary: i.summary, description: adf(i.description) },
+      });
+      state.issues[i.ref] = created.key;
+      await saveState();
+    }
+    for (let n = state.comments[i.ref] || 0; n < i.comments.length; n += 1) {
+      await asUserJson('POST', route`/rest/api/3/issue/${state.issues[i.ref]}/comment`, { body: adf(i.comments[n]) });
+      state.comments[i.ref] = n + 1;
+      await saveState();
+    }
   }
-  const ids = {};
+  // These stand in for what the Decided agent proposes in Rovo, so they are AI proposals: promoting one is a
+  // person reviewing an agent's suggestion, not someone approving their own text.
   for (const c of DEMO.candidates) {
-    const d = await createCandidate({ issueKey: issues.retry, quote: c.quote, title: c.title, statement: c.statement, origin: ORIGIN.HUMAN, accountId: context.accountId });
-    ids[c.key] = d.id;
+    if (state.ids[c.key]) continue;
+    const d = await createCandidate({ issueKey: state.issues.retry, quote: c.quote, title: c.title, statement: c.statement, origin: ORIGIN.AI });
+    state.ids[c.key] = d.id;
+    await saveState();
   }
-  const state = { issues, capId: ids.cap, at: Date.now() };
-  await kvs.set(demoKey(projectKey), state);
+  state.capId = state.ids.cap;
+  state.at = Date.now();
+  await saveState();
   return state;
 });
 
 /** Step 2: the charge client (via a coding agent over MCP) and the checkout work start relying on the issue decision. */
-resolver.define('demoUse', async ({ payload }) => {
-  const state = await kvs.get(demoKey(payload.projectKey));
+resolver.define('demoUse', async ({ payload, context }) => {
+  const state = await kvs.get(demoKey(projectOfContext(context, payload)));
   if (!state?.issues) throw new Error('Run the demo first.');
   await recordReliance([state.capId], state.issues['charge-client'], 'mcp');
   await recordReliance([state.capId], state.issues['checkout-msg'], 'person');
   const next = { ...state, used: true };
-  await kvs.set(demoKey(payload.projectKey), next);
+  await kvs.set(demoKey(projectOfContext(context, payload)), next);
   return next;
 });
 
@@ -406,7 +456,7 @@ resolver.define('demoUse', async ({ payload }) => {
  * relied on it is asked to re-check.
  */
 resolver.define('demoChange', async ({ payload, context }) => {
-  const state = await kvs.get(demoKey(payload.projectKey));
+  const state = await kvs.get(demoKey(projectOfContext(context, payload)));
   if (!state?.issues) throw new Error('Run the demo first.');
   const cap = await store().get(state.capId);
   if (!cap || cap.status !== STATUS.PROMOTED) throw new Error(`Promote ${state.capId} first.`);
@@ -414,10 +464,10 @@ resolver.define('demoChange', async ({ payload, context }) => {
   const c = DEMO.change;
   const d = await createCandidate({
     issueKey: state.issues.retry, quote: c.quote, title: c.title, statement: c.statement, rationale: c.rationale,
-    origin: ORIGIN.HUMAN, accountId: context.accountId, replaces: cap.id,
+    origin: ORIGIN.AI, replaces: cap.id,
   });
   const next = { ...state, changed: true, changeId: d.id };
-  await kvs.set(demoKey(payload.projectKey), next);
+  await kvs.set(demoKey(projectOfContext(context, payload)), next);
   return next;
 });
 
@@ -429,6 +479,9 @@ export const handler = resolver.getDefinitions();
 const admin = new Resolver();
 admin.define('getPolicy', async () => policy());
 admin.define('savePolicy', async ({ payload }) => {
+  const res = await api.asUser().requestJira(route`/rest/api/3/mypermissions?permissions=ADMINISTER`);
+  const isAdmin = res.ok && Boolean((await res.json())?.permissions?.ADMINISTER?.havePermission);
+  if (!isAdmin) throw new Error('Only Jira administrators can change the promotion policy.');
   const p = cleanPolicy(payload);
   await kvs.set(POLICY_KEY, p);
   return p;
@@ -443,16 +496,20 @@ async function confirmedDecisions() {
 }
 
 /** MCP tool: what has the team already decided about <topic>? Only human-promoted decisions are returned. */
-export async function findDecisions(payload) {
-  const query = [payload?.topic, payload?.issueKey].filter(Boolean).join(' ');
-  const hits = await withNames(rank(inScopeFor(await confirmedDecisions(), payload?.issueKey), query, Number(payload?.limit) || 5));
-  // A decision's own issue doesn't "rely" on it (agents look it up there when checking for conflicts).
-  await recordReliance(hits.filter((d) => d.issueKey !== payload?.issueKey).map((d) => d.id), payload?.issueKey, 'mcp');
+export async function findDecisions(payload, ctx) {
+  const issueKey = normalizeIssueKey(payload?.issueKey);
+  const query = String(payload?.topic || '');
+  const hits = await withNames(rank(inScopeFor(await confirmedDecisions(), issueKey), query, Number(payload?.limit) || 5));
+  // Only decisions that matched the topic count as used, and a decision's own issue doesn't "rely" on it
+  // (agents look it up there when checking for conflicts).
+  await recordReliance(hits.filter((d) => d.issueKey !== issueKey && strongMatch(d, query)).map((d) => d.id), issueKey, 'mcp',
+    payload?.context?.accountId || ctx?.principal?.accountId);
   if (!hits.length) {
     return `No confirmed team decisions match "${query}". Nothing has been decided about this yet — ask the team before assuming.`;
   }
+  const rules = hits.filter((d) => d.appliesHere !== false).length;
   return [
-    `${hits.length} confirmed team decision(s). Follow them; if your change would contradict one, stop and ask.`,
+    `${hits.length} confirmed decision(s), ${rules} of them binding for ${issueKey || 'this work'}${issueKey ? '' : ' (pass issueKey to know which team rules apply)'}. Follow the binding ones; if your change would contradict one, stop and ask.`,
     '',
     ...hits.map(formatForAgent),
   ].join('\n\n');

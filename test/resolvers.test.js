@@ -55,6 +55,7 @@ async function request(path, opts = {}) {
     if (method === 'PUT') { site.props[m[1]] = body; return json(204); }
     return site.props[m[1]] ? json(200, { value: site.props[m[1]] }) : json(404, {});
   }
+  if (p === '/rest/api/3/mypermissions') return json(200, { permissions: { ADMINISTER: { havePermission: site.admin !== false } } });
   if (p === '/rest/api/3/user') return json(200, { displayName: `User ${new URLSearchParams(qs).get('accountId')}` });
   if (p === '/rest/api/3/search/jql') {
     const proj = /project = "([A-Z0-9]+)"/.exec(decodeURIComponent(new URLSearchParams(qs).get('jql') || ''))?.[1];
@@ -151,13 +152,15 @@ test('agents only get decisions in scope; other teams do not see an issue decisi
 test('replacing a decision inherits its reach and tells the work that relied on it', async () => {
   const d = await call('add', cap);
   await call('promote', { id: d.id });
-  await call('relyOn', { id: d.id, issueKey: 'PAY-2' });
-  await call('relyOn', { id: d.id, issueKey: 'PAY-3' });
+  await call('relyOn', { id: d.id, issueKey: 'PAY-2' }, 'u-bob');
+  await call('relyOn', { id: d.id, issueKey: 'PAY-3' }, 'u-cy');
   await call('promoteScope', { id: d.id });
   site.issues['PAY-1'].comments.push('Because of the new PSP limits, we agreed to raise payment retries to 5 attempts.');
   const next = await call('add', { issueKey: 'PAY-1', statement: 'Payment retries are raised to 5.', quote: 'we agreed to raise payment retries to 5 attempts.', replaces: d.id });
   assert.equal(next.conflictsWith, d.id);
-  const promoted = await call('promote', { id: next.id, supersede: d.id, reason: 'New PSP contract' });
+  // Ana typed it in herself: replacing a Team decision needs a second person.
+  await assert.rejects(call('promote', { id: next.id, supersede: d.id, reason: 'New PSP contract' }), /needs a second person/);
+  const promoted = await call('promote', { id: next.id, supersede: d.id, reason: 'New PSP contract' }, 'u-bob');
   assert.equal(promoted.flagged, 2);
   assert.equal(promoted.scope, 'team');
   assert.match(site.issues['PAY-2'].comments.at(-1), /replaced by D-2/);
@@ -205,4 +208,47 @@ test('guided demo walks promote -> use -> team -> replace', async () => {
   assert.equal(fresh.id, ch.changeId);
   assert.equal(fresh.conflictsWith, s.capId);
   assert.equal((await call('demoState', { projectKey: 'DEMO' })).step, 'done');
+});
+
+test('looking something up is not evidence, and one person cannot vouch for themselves', async () => {
+  const d = await call('add', cap);
+  await call('promote', { id: d.id });
+  // An agent on PAY-2 asking about something else does not "use" the retry decision.
+  assert.match(await app.findDecisions({ topic: 'button colour', issueKey: 'PAY-2' }), /No confirmed team decisions/);
+  // Ana marking two issues herself is not evidence for her own promotion.
+  await call('relyOn', { id: d.id, issueKey: 'PAY-2' });
+  await call('relyOn', { id: d.id, issueKey: 'PAY-3' });
+  const [listed] = await call('list', { issueKey: 'PAY-1' });
+  assert.equal(listed.usage.issues, 0);
+  await assert.rejects(call('promoteScope', { id: d.id }), /cannot become a team decision yet/);
+  // A teammate can promote it (second person).
+  assert.equal((await call('promoteScope', { id: d.id }, 'u-bob')).scope, 'team');
+});
+
+test('agents may pass odd keys or none; storage never breaks the answer', async () => {
+  const d = await call('add', cap);
+  await call('promote', { id: d.id });
+  await call('promoteScope', { id: d.id }, 'u-bob');
+  assert.match(await app.findDecisions({ topic: 'payment retries', issueKey: 'https://x.atlassian.net/browse/pay-2' }), /TEAM DECISION — applies to all work in project PAY/);
+  const noKey = await app.findDecisions({ topic: 'payment retries' });
+  assert.match(noKey, /0 of them binding[\s\S]*TEAM DECISION of project PAY — NOT a rule/);
+  assert.match(await app.findDecisions({ topic: 'payment retries', issueKey: 'SHOP-1' }), /TEAM DECISION of project PAY — NOT a rule/);
+});
+
+test('current decisions cannot be discarded or re-promoted, and only Jira admins set the policy', async () => {
+  const d = await call('add', cap);
+  await call('promote', { id: d.id });
+  await assert.rejects(call('discard', { id: d.id }), /current decision/);
+  await assert.rejects(call('promote', { id: d.id }), /not a candidate/);
+  site.admin = false;
+  await assert.rejects(app.adminHandler.savePolicy({ payload: { requireSecondPerson: true } }), /Only Jira administrators/);
+});
+
+test('the demo candidates are AI proposals, so the judge promoting them is not self-promotion', async () => {
+  const s = await call('demoStart', { projectKey: 'DEMO' });
+  const p = await call('promote', { id: s.capId });
+  assert.equal(p.selfPromoted, false);
+  assert.equal(p.origin, 'ai');
+  // A second press does not create the issues again.
+  assert.deepEqual((await call('demoStart', { projectKey: 'DEMO' })).issues, s.issues);
 });
